@@ -1,0 +1,16 @@
+# Local Claude Code permissions / machine-specific (never commit)
+.claude/settings.local.json
+.claude/
+
+# User config (created from config.example.json by the installer)
+config.json
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Runtime caches the status line writes to $TMPDIR
+agent-status-*.json
+
+# OS cruft
+.DS_Store
