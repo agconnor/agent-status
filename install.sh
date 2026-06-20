@@ -41,9 +41,28 @@ do_reset() {
   json_del_key "$CLAUDE_SETTINGS" statusLine \
     && [ -f "$CLAUDE_SETTINGS" ] && ok "Claude Code: statusLine cleared from $CLAUDE_SETTINGS"
 
+  # Legacy: older versions wrote a (no-op) statusLineCmd into config.json
   CODEX_CFG="$HOME_DIR/.codex/config.json"
   json_del_key "$CODEX_CFG" statusLineCmd \
-    && [ -f "$CODEX_CFG" ] && ok "Codex: statusLineCmd cleared from $CODEX_CFG"
+    && [ -f "$CODEX_CFG" ] && ok "Codex: legacy statusLineCmd cleared from $CODEX_CFG"
+
+  # Codex native status line: remove only the exact lines we inserted
+  # (a hand-edited status_line is left untouched).
+  CODEX_TOML="$HOME_DIR/.codex/config.toml"
+  if [ -f "$CODEX_TOML" ]; then
+    "$NODE" - "$CODEX_TOML" <<'EOF'
+const fs = require('fs');
+const fp = process.argv[2];
+const OURS = new Set([
+  'status_line = ["model-with-reasoning", "context-used", "five-hour-limit", "weekly-limit", "git-branch", "current-dir"]',
+  'status_line_use_colors = true',
+]);
+let txt; try { txt = fs.readFileSync(fp, 'utf8'); } catch { process.exit(0); }
+const kept = txt.split('\n').filter(l => !OURS.has(l.trim()));
+fs.writeFileSync(fp, kept.join('\n'));
+EOF
+    ok "Codex: agent-status items removed from $CODEX_TOML (restart Codex)"
+  fi
 
   # Remove the snippet block(s): from the "# agent-status" marker line
   # through the next top-level `fi` (the outer if's closer, column 0).
@@ -172,22 +191,39 @@ for rcfile in "$ZSHRC" "$BASHRC"; do
 done
 [ "$added_shell" = "0" ] && warn "No .zshrc or .bashrc found — shell integration skipped"
 
-# ── 5. Codex config (if installed) ──────────────────────────────
+# ── 5. Codex native status line (if installed) ──────────────────
+# Codex has NO external-command status-line hook — it renders its own
+# built-in status line from [tui].status_line in ~/.codex/config.toml,
+# a list of built-in item keys. We configure those items to mirror the
+# agent-status layout (model+effort, context, usage limits, branch, cwd).
 
 CODEX_DIR="$HOME_DIR/.codex"
 if [ -d "$CODEX_DIR" ]; then
-  "$NODE" - "$CODEX_DIR/config.json" "$BINARY" <<'EOF'
+  CODEX_TOML="$CODEX_DIR/config.toml"
+  [ -f "$CODEX_TOML" ] && cp "$CODEX_TOML" "$CODEX_TOML.bak.agentstatus"
+  "$NODE" - "$CODEX_TOML" <<'EOF'
 const fs = require('fs');
-const [,, fp, bin] = process.argv;
-let cfg = {};
-try { cfg = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch {}
-cfg.statusLineCmd = bin;
+const fp = process.argv[2];
+let txt = ''; try { txt = fs.readFileSync(fp, 'utf8'); } catch {}
+const KEYS = 'status_line = ["model-with-reasoning", "context-used", "five-hour-limit", "weekly-limit", "git-branch", "current-dir"]';
+const COLOR = 'status_line_use_colors = true';
+if (/^\s*status_line\s*=/m.test(txt)) { console.log('exists'); process.exit(0); }  // don't clobber a hand-tuned line
+const lines = txt.split('\n');
+const tuiIdx = lines.findIndex(l => /^\s*\[tui\]\s*$/.test(l));
+if (tuiIdx !== -1) {
+  lines.splice(tuiIdx + 1, 0, KEYS, COLOR);          // add under existing [tui]
+} else {
+  const firstTable = lines.findIndex(l => /^\s*\[/.test(l));
+  const block = ['[tui]', KEYS, COLOR, ''];
+  lines.splice(firstTable === -1 ? lines.length : firstTable, 0, ...block);
+}
 fs.mkdirSync(require('path').dirname(fp), { recursive: true });
-fs.writeFileSync(fp, JSON.stringify(cfg, null, 2) + '\n');
+fs.writeFileSync(fp, lines.join('\n'));
+console.log('set');
 EOF
-  ok "Codex: statusLineCmd set in $CODEX_DIR/config.json"
+  ok "Codex: [tui].status_line configured in $CODEX_TOML (restart Codex to see it)"
 else
-  info "Codex not installed (~/.codex missing) — shell snippet covers it when you install"
+  info "Codex not installed (~/.codex missing) — skipping native status-line config"
 fi
 
 # ── 6. Budget config ─────────────────────────────────────────────

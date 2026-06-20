@@ -34,10 +34,14 @@ sh install.sh --daily 5 --weekly 25   # also set dollar-budget fallbacks
 ```
 
 The installer:
-- sets Claude Code's `statusLine` in `~/.claude/settings.json`
-- adds a shell snippet to `~/.zshrc` / `~/.bashrc` for **Cursor Agent** and **Codex** terminals
-- sets `statusLineCmd` in `~/.codex/config.json` if Codex is installed
+- sets Claude Code's `statusLine` command in `~/.claude/settings.json` (this is the one that runs `agent-status`)
+- configures Codex's **native** `[tui].status_line` in `~/.codex/config.toml` to mirror the same layout (backs up the file first)
+- adds a shell snippet to `~/.zshrc` / `~/.bashrc` (a fallback line for plain terminals)
 - writes default budget config to `~/.config/agent-status/config.json`
+
+### How each agent renders the status line
+
+Only **Claude Code** supports running an external command for its status line, so the `agent-status` script (and the exact ` │ `-separated layout above) is Claude-Code-only. **Codex** and **Cursor** each render their *own* built-in status line and expose no external-command hook — so for Codex the installer configures its native item list to look as close as possible (model+effort · context · usage limits · branch · cwd, in Codex's own `·` style), and Cursor shows its built-in footer. The shell snippet only appears in a plain terminal that has the agent's env vars set; the Codex/Cursor TUIs don't run shell `precmd`, so it never shows *inside* them.
 
 Restart Claude Code and open a new terminal to pick it up.
 
@@ -47,11 +51,12 @@ Restart Claude Code and open a new terminal to pick it up.
 sh install.sh --reset
 ```
 
-Removes the shell snippet from `~/.zshrc`/`~/.bashrc` and the `statusLine` /
-`statusLineCmd` keys from Claude Code and Codex (other settings untouched; your
+Removes the shell snippet from `~/.zshrc`/`~/.bashrc`, Claude Code's `statusLine`
+command, and the exact `[tui].status_line` items it added to `~/.codex/config.toml`
+(a hand-edited status line is left alone; other settings and your
 `~/.config/agent-status/config.json` budgets are kept). **Open a new terminal and
-restart Codex / Cursor afterward** — existing sessions already loaded the old
-prompt hook and keep printing it until reloaded.
+restart Codex / Cursor afterward** so they reload. A pre-change backup of the Codex
+config is saved at `~/.codex/config.toml.bak.agentstatus`.
 
 ## Wiring it into `agent` (Cursor) and `codex` manually
 
@@ -77,13 +82,24 @@ Then `source ~/.zshrc` or open a new terminal. The line prints above each prompt
 
 ### Codex
 
-Point Codex's status-line command at the wrapper in `~/.codex/config.json`:
+Codex has **no** external-command status-line hook. It renders a built-in status
+line from a list of item keys in `~/.codex/config.toml`. To mirror agent-status,
+add a `[tui]` section:
 
-```json
-{ "statusLineCmd": "/absolute/path/to/agent-status/agent-status" }
+```toml
+[tui]
+status_line = ["model-with-reasoning", "context-used", "five-hour-limit", "weekly-limit", "git-branch", "current-dir"]
+status_line_use_colors = true
 ```
 
-The shell snippet above also covers Codex terminals (it checks `$CODEX_SESSION_ID`), so you get the line either way.
+Restart Codex to pick it up (or use the in-app **`/status` → Configure Status Line** menu).
+
+Available item keys: `app-name`, `project-name`, `current-dir`, `run-state`,
+`thread-title`, `git-branch`, `context-remaining`, `context-used`,
+`five-hour-limit`, `weekly-limit`, `codex-version`, `used-tokens`,
+`total-input-tokens`, `total-output-tokens`, `thread-id`, `fast-mode`,
+`model-with-reasoning`, `reasoning`, `task-progress`. (Usage-limit items show
+the amount *remaining*, which is Codex's convention.)
 
 ## How it reads usage
 
