@@ -1,0 +1,15 @@
+{
+  "name": "agent-status",
+  "version": "1.0.0",
+  "description": "Compact status line for CLI AI agents: Claude Code, Codex, Cursor",
+  "bin": {
+    "agent-status": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "setup": "node setup.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

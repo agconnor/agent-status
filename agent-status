@@ -1,0 +1,40 @@
+#!/bin/sh
+# agent-status — finds node from common locations then runs index.js
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+find_node() {
+  # 1. In PATH
+  command -v node 2>/dev/null && return
+
+  # 2. Homebrew (Apple Silicon / Intel)
+  for p in /opt/homebrew/bin/node /usr/local/bin/node; do
+    [ -x "$p" ] && { echo "$p"; return; }
+  done
+
+  # 3. nvm default
+  NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ -d "$NVM_DIR/versions/node" ]; then
+    # Pick the most-recently-modified version's binary
+    latest=$(ls -t "$NVM_DIR/versions/node" | head -1)
+    [ -x "$NVM_DIR/versions/node/$latest/bin/node" ] && \
+      echo "$NVM_DIR/versions/node/$latest/bin/node" && return
+  fi
+
+  # 4. Cursor's bundled node
+  CURSOR_AGENT="$HOME/.local/share/cursor-agent/versions"
+  if [ -d "$CURSOR_AGENT" ]; then
+    latest=$(ls -t "$CURSOR_AGENT" | head -1)
+    [ -x "$CURSOR_AGENT/$latest/node" ] && \
+      echo "$CURSOR_AGENT/$latest/node" && return
+  fi
+
+  # 5. pkg/env (some CI/sandbox environments)
+  [ -x /pkg/env/global/bin/node ] && { echo /pkg/env/global/bin/node; return; }
+
+  return 1
+}
+
+NODE=$(find_node) || { echo "[agent-status] node not found" >&2; exit 1; }
+exec "$NODE" "$SCRIPT_DIR/index.js" "$@"
