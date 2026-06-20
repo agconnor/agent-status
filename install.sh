@@ -1,6 +1,7 @@
 #!/bin/sh
 # install.sh — one-shot setup for agent-status
 # Usage:  sh install.sh [--daily 5] [--weekly 25]
+#         sh install.sh --reset      # remove all agent-status wiring
 set -e
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,23 +15,73 @@ ok()    { printf '✓ %s\n' "$*"; }
 warn()  { printf '! %s\n' "$*"; }
 die()   { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-read_json_field() {
-  # read_json_field <file> <key>  — naive grep-based, avoids jq dependency
-  grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null \
-    | head -1 | sed 's/.*:[[:space:]]*"\(.*\)"/\1/'
+# delete one top-level key from a JSON file, preserving everything else
+# (no-op if the file is missing/unparseable or the key isn't present)
+json_del_key() {
+  _file="$1"; _key="$2"
+  [ -f "$_file" ] || return 0
+  "$NODE" - "$_file" "$_key" <<'EOF'
+const fs = require('fs');
+const [,, fp, key] = process.argv;
+let cfg; try { cfg = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { process.exit(0); }
+if (cfg && typeof cfg === 'object' && key in cfg) {
+  delete cfg[key];
+  fs.writeFileSync(fp, JSON.stringify(cfg, null, 2) + '\n');
+}
+EOF
+}
+
+# ── reset / uninstall ────────────────────────────────────────────
+# Strips the shell snippet and the Claude/Codex status-line keys.
+# Leaves ~/.config/agent-status/config.json (your budgets) untouched.
+do_reset() {
+  printf 'Removing agent-status wiring...\n'
+
+  CLAUDE_SETTINGS="$HOME_DIR/.claude/settings.json"
+  json_del_key "$CLAUDE_SETTINGS" statusLine \
+    && [ -f "$CLAUDE_SETTINGS" ] && ok "Claude Code: statusLine cleared from $CLAUDE_SETTINGS"
+
+  CODEX_CFG="$HOME_DIR/.codex/config.json"
+  json_del_key "$CODEX_CFG" statusLineCmd \
+    && [ -f "$CODEX_CFG" ] && ok "Codex: statusLineCmd cleared from $CODEX_CFG"
+
+  # Remove the snippet block(s): from the "# agent-status" marker line
+  # through the next top-level `fi` (the outer if's closer, column 0).
+  for rcfile in "$HOME_DIR/.zshrc" "$HOME_DIR/.bashrc"; do
+    [ -f "$rcfile" ] || continue
+    if grep -qxF '# agent-status' "$rcfile" 2>/dev/null; then
+      tmp=$(mktemp)
+      awk '
+        /^# agent-status$/ { skip=1; next }
+        skip && /^fi$/     { skip=0; next }
+        skip               { next }
+        { print }
+      ' "$rcfile" > "$tmp" && mv "$tmp" "$rcfile"
+      ok "Shell: snippet removed from $rcfile"
+    else
+      info "Shell: nothing to remove in $rcfile"
+    fi
+  done
+
+  printf '\nReset complete — the status line is unwired.\n'
+  printf 'Important: open a NEW terminal and restart Codex / Cursor.\n'
+  printf 'Existing sessions already loaded the old prompt hook, so they\n'
+  printf 'keep printing the old line until the shell is reloaded.\n'
 }
 
 # ── args ─────────────────────────────────────────────────────────
 
 DAILY=""
 WEEKLY=""
+RESET=""
 i=1
 while [ $i -le $# ]; do
   eval "arg=\${$i}"
   i=$((i + 1))
   case "$arg" in
-    --daily|-d)  eval "DAILY=\${$i}";  i=$((i + 1)) ;;
-    --weekly|-w) eval "WEEKLY=\${$i}"; i=$((i + 1)) ;;
+    --daily|-d)        eval "DAILY=\${$i}";  i=$((i + 1)) ;;
+    --weekly|-w)       eval "WEEKLY=\${$i}"; i=$((i + 1)) ;;
+    --reset|--uninstall) RESET=1 ;;
   esac
 done
 
@@ -61,6 +112,12 @@ find_node() {
 
 NODE=$(find_node) || die "Node.js not found. Install it via Homebrew: brew install node"
 ok "Node found: $NODE"
+
+# ── reset short-circuits the install steps ───────────────────────
+if [ -n "$RESET" ]; then
+  do_reset
+  exit 0
+fi
 
 # ── 3. Claude Code ───────────────────────────────────────────────
 

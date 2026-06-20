@@ -41,6 +41,18 @@ The installer:
 
 Restart Claude Code and open a new terminal to pick it up.
 
+### Uninstall / reset
+
+```sh
+sh install.sh --reset
+```
+
+Removes the shell snippet from `~/.zshrc`/`~/.bashrc` and the `statusLine` /
+`statusLineCmd` keys from Claude Code and Codex (other settings untouched; your
+`~/.config/agent-status/config.json` budgets are kept). **Open a new terminal and
+restart Codex / Cursor afterward** — existing sessions already loaded the old
+prompt hook and keep printing it until reloaded.
+
 ## Wiring it into `agent` (Cursor) and `codex` manually
 
 `install.sh` does this for you, but if you'd rather wire it by hand:
