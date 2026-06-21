@@ -36,12 +36,18 @@ sh install.sh --daily 5 --weekly 25   # also set dollar-budget fallbacks
 The installer:
 - sets Claude Code's `statusLine` command in `~/.claude/settings.json` (this is the one that runs `agent-status`)
 - configures Codex's **native** `[tui].status_line` in `~/.codex/config.toml` to mirror the same layout (backs up the file first)
+- enables Cursor's footer running-time display (`display.showStatusLineRunningTime`) in `~/.cursor/cli-config.json` — the only customization Cursor's fixed footer exposes (backs up the file first)
 - adds a shell snippet to `~/.zshrc` / `~/.bashrc` (a fallback line for plain terminals)
 - writes default budget config to `~/.config/agent-status/config.json`
 
 ### How each agent renders the status line
 
-Only **Claude Code** supports running an external command for its status line, so the `agent-status` script (and the exact ` │ `-separated layout above) is Claude-Code-only. **Codex** and **Cursor** each render their *own* built-in status line and expose no external-command hook — so for Codex the installer configures its native item list to look as close as possible (model+effort · context · usage limits · branch · cwd, in Codex's own `·` style), and Cursor shows its built-in footer. The shell snippet only appears in a plain terminal that has the agent's env vars set; the Codex/Cursor TUIs don't run shell `precmd`, so it never shows *inside* them.
+Only **Claude Code** supports running an external command for its status line, so the `agent-status` script (and the exact ` │ `-separated layout above) is Claude-Code-only. **Codex** and **Cursor** each render their *own* built-in status line and expose no external-command hook:
+
+- **Codex** — the installer configures its native item list (`[tui].status_line`) to look as close as possible: model+effort · context · usage limits · branch · cwd, in Codex's own `·` style.
+- **Cursor** — its footer (`model · context% · cwd · branch`) is a **fixed** built-in component. Unlike Codex it has *no* configurable item list and no command hook, so it can't be made to render the `agent-status` layout. The single knob it exposes is `display.showStatusLineRunningTime` in `~/.cursor/cli-config.json`, which adds the elapsed running time to the footer — the installer turns that on.
+
+The shell snippet only appears in a **plain terminal** that has the agent's env vars set (e.g. the Cursor/VSCode *integrated terminal*); the Codex and `cursor-agent` TUIs don't run shell `precmd`, so it never shows *inside* them.
 
 Restart Claude Code and open a new terminal to pick it up.
 
@@ -52,11 +58,12 @@ sh install.sh --reset
 ```
 
 Removes the shell snippet from `~/.zshrc`/`~/.bashrc`, Claude Code's `statusLine`
-command, and the exact `[tui].status_line` items it added to `~/.codex/config.toml`
-(a hand-edited status line is left alone; other settings and your
-`~/.config/agent-status/config.json` budgets are kept). **Open a new terminal and
-restart Codex / Cursor afterward** so they reload. A pre-change backup of the Codex
-config is saved at `~/.codex/config.toml.bak.agentstatus`.
+command, the exact `[tui].status_line` items it added to `~/.codex/config.toml`
+(a hand-edited status line is left alone), and turns Cursor's footer running-time
+display back off in `~/.cursor/cli-config.json`. Other settings and your
+`~/.config/agent-status/config.json` budgets are kept. **Open a new terminal and
+restart Codex / Cursor afterward** so they reload. Pre-change backups are saved at
+`~/.codex/config.toml.bak.agentstatus` and `~/.cursor/cli-config.json.bak.agentstatus`.
 
 ## Wiring it into `agent` (Cursor) and `codex` manually
 
@@ -64,11 +71,26 @@ config is saved at `~/.codex/config.toml.bak.agentstatus`.
 
 ### Cursor Agent (`agent` / `cursor-agent`)
 
-Cursor has no native status-line hook, so it renders through your shell prompt. Add this to `~/.zshrc` (or `~/.bashrc`) — it only fires inside a Cursor terminal:
+The `cursor-agent` TUI renders a **fixed** built-in footer (`model · context% ·
+cwd · branch`). It has no external-command hook and no configurable item list, so
+the `agent-status` script **cannot** render inside it. The only thing you can
+change is whether the footer shows elapsed running time — set it in
+`~/.cursor/cli-config.json`:
+
+```json
+{ "display": { "showStatusLineRunningTime": true } }
+```
+
+(or use the in-app **`/config`** menu → Editor → *Show status line running time*).
+Restart Cursor to pick it up.
+
+If you instead want the full ` │ `-separated `agent-status` line, that's only
+possible in a **plain shell** — e.g. the Cursor/VSCode *integrated terminal*,
+which (unlike the TUI) runs `precmd`. Add this to `~/.zshrc` (or `~/.bashrc`):
 
 ```sh
 # agent-status
-if [ -n "$CURSOR_AGENT" ] || [ -n "$CURSOR_TRACE_ID" ] || [ -n "$VSCODE_IPC_HOOK_CLI" ] || [ -n "$CODEX_SESSION_ID" ]; then
+if [ -n "$VSCODE_IPC_HOOK_CLI" ] || [ -n "$CURSOR_TRACE_ID" ]; then
   _agent_status_precmd() { /absolute/path/to/agent-status/agent-status 2>/dev/null; }
   if [ -n "$ZSH_VERSION" ]; then
     precmd_functions+=(_agent_status_precmd)
