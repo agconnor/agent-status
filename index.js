@@ -61,9 +61,48 @@ function fmtTimeLeft(ms) {
 function shortPwd(p) {
   const home = os.homedir();
   const rel  = p.startsWith(home) ? '~' + p.slice(home.length) : p;
+  const norm = rel.replace(/\\/g, '/');
   // Truncate deeply nested paths: keep last 2 segments after ~
-  const parts = rel.split('/');
-  return parts.length > 3 ? '…/' + parts.slice(-2).join('/') : rel;
+  const parts = norm.split('/');
+  return parts.length > 3 ? '…/' + parts.slice(-2).join('/') : norm;
+}
+
+function claudeProjectKey(cwd) {
+  // macOS: /Users/foo/bar → -Users-foo-bar;  Windows: C:\foo\bar → C--foo-bar
+  return process.platform === 'win32'
+    ? cwd.replace(/[:\\]/g, '-')
+    : cwd.replace(/\//g, '-');
+}
+
+function readClaudeOAuthToken() {
+  if (process.platform === 'darwin') {
+    try {
+      const raw = execFileSync('security',
+        ['find-generic-password', '-s', 'Claude Code-credentials', '-a', os.userInfo().username, '-w'],
+        { encoding: 'utf8', timeout: 1000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      return JSON.parse(raw)?.claudeAiOauth?.accessToken || null;
+    } catch { return null; }
+  }
+  const creds = readJSON(path.join(os.homedir(), '.claude', '.credentials.json'));
+  return creds?.claudeAiOauth?.accessToken || null;
+}
+
+function readCursorAccessToken() {
+  if (process.platform === 'darwin') {
+    try {
+      return execFileSync('security',
+        ['find-generic-password', '-s', 'cursor-access-token', '-w'],
+        { encoding: 'utf8', timeout: 1000, stdio: ['pipe', 'pipe', 'pipe'] }).trim() || null;
+    } catch { return null; }
+  }
+  for (const fp of [
+    path.join(process.env.APPDATA || '', 'Cursor', 'auth.json'),
+    path.join(os.homedir(), '.cursor', 'auth.json'),
+  ]) {
+    const auth = readJSON(fp);
+    if (auth?.accessToken) return auth.accessToken;
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -164,14 +203,7 @@ function readClaudeUsage() {
   const cached = cacheRead('claude-usage', USAGE_CACHE_TTL_MS);
   if (cached) return cached;
 
-  // 1. Read the OAuth access token from the macOS keychain (read-only)
-  let token = null;
-  try {
-    const raw = execFileSync('security',
-      ['find-generic-password', '-s', 'Claude Code-credentials', '-a', os.userInfo().username, '-w'],
-      { encoding: 'utf8', timeout: 1000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    token = JSON.parse(raw)?.claudeAiOauth?.accessToken || null;
-  } catch { return null; }
+  const token = readClaudeOAuthToken();
   if (!token) return null;
 
   // 2. Hit the usage endpoint via curl (keeps this path synchronous, zero-dep)
@@ -208,16 +240,26 @@ function readClaudeUsage() {
 // Claude Code reader
 // ─────────────────────────────────────────────────────────────
 
-function readClaudeCode() {
-  const sessionId = process.env.CLAUDE_CODE_SESSION_ID;
-  if (!sessionId) return {};
+function readClaudeCode(payload) {
+  // Claude Code pipes a JSON payload to its statusLine command on stdin; it
+  // carries session_id, transcript_path, cwd, model and cost. Prefer those —
+  // they're robust on Windows, where reconstructing the project-key path is
+  // brittle (drive-letter casing must match the folder name exactly). Fall
+  // back to the env var + reconstructed path when invoked outside the
+  // statusLine (e.g. a shell prompt hook with no stdin payload).
+  const sessionId = payload?.session_id || process.env.CLAUDE_CODE_SESSION_ID;
 
-  const cached = cacheRead(`cc-${sessionId}`);
-  if (cached) return cached;
+  const cacheKey = sessionId ? `cc-${sessionId}` : null;
+  if (cacheKey) {
+    const cached = cacheRead(cacheKey);
+    if (cached) return cached;
+  }
 
-  const home       = os.homedir();
-  const projectKey = process.cwd().replace(/\//g, '-');
-  const jsonlPath  = path.join(home, '.claude', 'projects', projectKey, `${sessionId}.jsonl`);
+  const home = os.homedir();
+  const cwd  = payload?.cwd || payload?.workspace?.current_dir || process.cwd();
+  const jsonlPath = payload?.transcript_path
+    || (sessionId ? path.join(home, '.claude', 'projects', claudeProjectKey(cwd), `${sessionId}.jsonl`) : null);
+  if (!jsonlPath) return {};
 
   let firstTs = null, lastTs = null, totalCost = 0;
   let lastModel = null, ctxTokens = 0;
@@ -272,18 +314,21 @@ function readClaudeCode() {
     }
   }
 
+  const model    = lastModel || payload?.model?.id || null;
+  const convCost = totalCost > 0 ? totalCost : (payload?.cost?.total_cost_usd ?? 0);
   const result = {
     agent: 'claude-code',
-    model: lastModel,
+    model,
     ctxTokens,
-    ctxWindow: lastModel ? (MODELS[lastModel]?.ctx ?? null) : null,
-    convDuration: firstTs && lastTs ? lastTs - firstTs : null,
-    convCost: totalCost,
+    ctxWindow: model ? (MODELS[model]?.ctx ?? null) : null,
+    convDuration: firstTs && lastTs ? lastTs - firstTs : (payload?.cost?.total_duration_ms ?? null),
+    convCost,
     todayCost,
     weekCost,
+    cwd,
     ...(readClaudeUsage() || {}),  // real session/weekly utilization windows
   };
-  cacheWrite(`cc-${sessionId}`, result);
+  if (cacheKey) cacheWrite(cacheKey, result);
   return result;
 }
 
@@ -439,12 +484,7 @@ function readCursorUsage() {
   const cached = cacheRead('cursor-usage', USAGE_CACHE_TTL_MS);
   if (cached) return cached;
 
-  let token = null;
-  try {
-    token = execFileSync('security',
-      ['find-generic-password', '-s', 'cursor-access-token', '-w'],
-      { encoding: 'utf8', timeout: 1000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-  } catch { return null; }
+  const token = readCursorAccessToken();
   if (!token) return null;
 
   const post = (method) => {
@@ -484,27 +524,40 @@ function readCursor() {
   return { ...base, ...(readCursorUsage() || {}) };
 }
 
-// Cursor CLI status line: JSON payload on stdin (see StatusLinePayload spec).
-// NOTE: Claude Code ALSO pipes a JSON payload to its statusLine command and
-// shares most fields (model, workspace, session_id, transcript_path, version,
-// output_style, even hook_event_name). The only fields Cursor stamps that
-// Claude never does are `cursor_version` and `context_window` — key off those
-// so a Claude Code session is never rendered as Cursor (the "bleed" bug).
-function isCursorPayload(payload) {
-  // Cursor stamps `cursor_version`/`context_window`; Claude Code never does.
-  // Keying off these prevents a Claude session rendering as Cursor (bleed bug).
-  return !!(payload && (payload.cursor_version || payload.context_window));
-}
-
-function readStatusLinePayload() {
+// Both Claude Code and Cursor pipe a JSON payload to their statusLine command
+// on stdin, sharing most fields (model, workspace, session_id, transcript_path,
+// version, output_style, even hook_event_name). Read it once, then disambiguate.
+function readStdinPayload() {
   if (process.stdin.isTTY) return null;
   try {
     const raw = fs.readFileSync(0, 'utf8').trim();
     if (!raw.startsWith('{')) return null;
-    const payload = JSON.parse(raw);
-    if (isCursorPayload(payload)) return payload;
-  } catch {}
-  return null;
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
+// `cursor_version` is the ONLY field Cursor stamps that Claude Code never does.
+// (Current Claude Code statusLine payloads DO carry `context_window`, so keying
+// off that rendered every Claude session as Cursor — the "bleed" bug.)
+function isCursorPayload(p) {
+  return !!(p && p.cursor_version);
+}
+
+// Decide which reader owns this invocation. Claude Code and Cursor BOTH pipe a
+// statusLine payload that now shares `context_window` and `transcript_path`, so
+// the payload SHAPE can't disambiguate them — routing on it bled both ways
+// (Claude rendered as Cursor; Cursor rendered with Claude's usage). The reliable
+// signal is env: Claude Code sets CLAUDECODE/CLAUDE_CODE_SESSION_ID, Cursor never
+// does, and Codex pipes no payload at all. So: cursor_version is a definitive
+// Cursor marker; else CLAUDECODE means Claude; else any remaining stdin payload
+// must be Cursor's; else fall back to pure env detection.
+function chooseSource(agent, payload) {
+  if (isCursorPayload(payload)) return 'cursor';
+  if (agent === 'claude-code')  return 'claude-code';
+  if (payload)                  return 'cursor';
+  if (agent === 'codex')        return 'codex';
+  if (agent === 'cursor')       return 'cursor';
+  return 'unknown';
 }
 
 function readCursorFromPayload(payload) {
@@ -681,21 +734,18 @@ function buildLine(data, cfg) {
 // ─────────────────────────────────────────────────────────────
 
 function main() {
-  const cfg   = loadConfig();
-  const agent = detectAgent();
-  let data    = {};
+  const cfg     = loadConfig();
+  const agent   = detectAgent();
+  const payload = readStdinPayload();
+  let data      = {};
 
-  // Claude Code is identified by its env vars and reads its own JSONL — handle
-  // it first so its stdin payload is never mistaken for Cursor's. Only after
-  // ruling out Claude do we consider a Cursor statusLine payload on stdin.
-  if (agent === 'claude-code') {
-    data = readClaudeCode();
-  } else {
-    const payload = readStatusLinePayload();
-    if      (payload)            data = readCursorFromPayload(payload);
-    else if (agent === 'codex')  data = readCodex();
-    else if (agent === 'cursor') data = readCursor();
-    else data = { agent: 'unknown' };
+  switch (chooseSource(agent, payload)) {
+    case 'claude-code': data = readClaudeCode(payload); break;
+    // A Cursor invocation with a statusLine payload reads it directly; without
+    // one (e.g. the IDE/agent) it falls back to the usage API.
+    case 'cursor':      data = payload ? readCursorFromPayload(payload) : readCursor(); break;
+    case 'codex':       data = readCodex(); break;
+    default:            data = { agent: 'unknown' };
   }
 
   const line = buildLine(data, cfg);
@@ -710,5 +760,5 @@ module.exports = {
   fmtDuration, fmtCost, fmtPct, fmtTimeLeft, shortPwd,
   threshLevel, modelLevel, calcCost,
   usageField, budgetField, buildLine, detectAgent,
-  isCursorPayload, loadConfig, MODELS,
+  isCursorPayload, chooseSource, loadConfig, claudeProjectKey, MODELS,
 };

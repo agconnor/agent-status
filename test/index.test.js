@@ -14,7 +14,7 @@ const {
   fmtDuration, fmtCost, fmtPct, fmtTimeLeft, shortPwd,
   threshLevel, modelLevel, calcCost,
   usageField, budgetField, buildLine, detectAgent,
-  isCursorPayload, loadConfig,
+  isCursorPayload, loadConfig, claudeProjectKey, chooseSource,
 } = require('../index.js');
 
 // ─────────────────────────────────────────────────────────────
@@ -83,6 +83,20 @@ test('shortPwd: home → ~, deep paths truncate to last 2 segments', () => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// claudeProjectKey  (cwd → ~/.claude/projects/<key> directory name)
+// ─────────────────────────────────────────────────────────────
+test('claudeProjectKey: maps cwd to Claude\'s project-dir key per platform', () => {
+  if (process.platform === 'win32') {
+    // drive colon + every backslash collapse to a dash (C:\a\b → C--a-b)
+    assert.equal(claudeProjectKey('C:\\Users\\foo\\bar'), 'C--Users-foo-bar');
+    assert.equal(claudeProjectKey('D:\\proj'), 'D--proj');
+  } else {
+    // every slash becomes a dash, including the leading one (/Users/foo → -Users-foo)
+    assert.equal(claudeProjectKey('/Users/foo/bar'), '-Users-foo-bar');
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // threshLevel
 // ─────────────────────────────────────────────────────────────
 test('threshLevel: red above redAt, amber above amberAt, else null', () => {
@@ -143,23 +157,62 @@ test('budgetField: null without budget, caps used at budget', () => {
 // ─────────────────────────────────────────────────────────────
 // isCursorPayload  (the render-bleed discriminator)
 // ─────────────────────────────────────────────────────────────
-test('isCursorPayload: true only for Cursor-exclusive markers', () => {
+test('isCursorPayload: cursor_version is the only Cursor marker', () => {
   assert.equal(isCursorPayload({ cursor_version: '2026.06.19' }), true);
-  assert.equal(isCursorPayload({ context_window: { used_percentage: 12 } }), true);
+  // context_window is NOT Cursor-exclusive — current Claude Code statusLine
+  // payloads also carry it, so it must never on its own mark a payload Cursor.
+  assert.equal(isCursorPayload({ context_window: { used_percentage: 12 } }), false);
 });
 
-test('isCursorPayload: a Claude-shaped payload is NOT Cursor', () => {
-  // mirrors Claude Code's statusLine stdin: overlapping fields, no cursor markers
+test('isCursorPayload: a real Claude Code payload (with context_window) is NOT Cursor', () => {
+  // Mirrors what current Claude Code actually pipes to statusLine on stdin: it
+  // now includes a `context_window` object. Keying off context_window rendered
+  // every Claude session as Cursor (the bleed bug); only cursor_version is safe.
   const claude = {
     model: { id: 'claude-opus-4-8', display_name: 'Opus' },
     workspace: { current_dir: '/x', project_dir: '/x' },
     session_id: 'abc', transcript_path: '/t', version: '2.1',
-    output_style: 'default', hook_event_name: 'Status',
+    output_style: { name: 'default' }, hook_event_name: 'Status',
     cost: { total_cost_usd: 1 }, exceeds_200k_tokens: false,
+    context_window: {
+      total_input_tokens: 84_000, context_window_size: 200_000,
+      used_percentage: 42, remaining_percentage: 58,
+    },
   };
   assert.equal(isCursorPayload(claude), false);
   assert.equal(isCursorPayload({}), false);
   assert.equal(isCursorPayload(null), false);
+});
+
+// ─────────────────────────────────────────────────────────────
+// chooseSource  (which reader handles this invocation — bleed-proof routing)
+//   Claude Code and Cursor BOTH pipe a statusLine payload sharing
+//   context_window + transcript_path, so the payload shape can't tell them
+//   apart. Claude Code sets CLAUDECODE in env; Cursor never does. Route by env.
+// ─────────────────────────────────────────────────────────────
+test('chooseSource: Claude payload with context_window routes to Claude (no Cursor bleed)', () => {
+  const claudePayload = { transcript_path: '/t', context_window: { used_percentage: 42 } };
+  assert.equal(chooseSource('claude-code', claudePayload), 'claude-code');
+});
+
+test('chooseSource: Cursor payload (no CLAUDECODE) routes to Cursor (no reverse bleed)', () => {
+  // Cursor's payload shares transcript_path/context_window with Claude; the only
+  // reliable signal is that CLAUDECODE is absent. Must NOT route to Claude even
+  // when env detection misses (agent "unknown").
+  const cursorPayload = { transcript_path: '/t', context_window: { used_percentage: 30 } };
+  assert.equal(chooseSource('cursor', cursorPayload), 'cursor');
+  assert.equal(chooseSource('unknown', cursorPayload), 'cursor');
+});
+
+test('chooseSource: explicit cursor_version is always Cursor', () => {
+  assert.equal(chooseSource('unknown', { cursor_version: '2026.06' }), 'cursor');
+});
+
+test('chooseSource: no payload falls back to env detection', () => {
+  assert.equal(chooseSource('claude-code', null), 'claude-code');
+  assert.equal(chooseSource('codex', null), 'codex');
+  assert.equal(chooseSource('cursor', null), 'cursor');
+  assert.equal(chooseSource('unknown', null), 'unknown');
 });
 
 // ─────────────────────────────────────────────────────────────
