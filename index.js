@@ -110,11 +110,25 @@ function calcCost(usage, model) {
        + (usage.cache_read_input_tokens     || 0) * p.cr  / M;
 }
 
-function getGitBranch() {
+function getGitBranch(cwd = process.cwd()) {
   try {
     return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'],
-      { encoding: 'utf8', timeout: 500, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      { encoding: 'utf8', timeout: 500, stdio: ['pipe', 'pipe', 'pipe'], cwd }).trim();
   } catch { return null; }
+}
+
+function readTranscriptStats(jsonlPath) {
+  let convDuration = null, turns = 0;
+  try {
+    const stat      = fs.statSync(jsonlPath);
+    const startTime = stat.birthtimeMs || stat.ctimeMs;
+    convDuration    = Date.now() - startTime;
+    const lines     = fs.readFileSync(jsonlPath, 'utf8').trim().split('\n');
+    for (const line of lines) {
+      try { if (JSON.parse(line).role === 'assistant') turns++; } catch {}
+    }
+  } catch {}
+  return { convDuration, turns };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -372,18 +386,7 @@ function readCursorAgent() {
   if (cached) return cached;
 
   const jsonlPath = path.join(transcriptDir, convId, `${convId}.jsonl`);
-  let convDuration = null, turns = 0;
-
-  try {
-    const stat      = fs.statSync(jsonlPath);
-    const startTime = stat.birthtimeMs || stat.ctimeMs;
-    convDuration    = Date.now() - startTime;
-
-    const lines = fs.readFileSync(jsonlPath, 'utf8').trim().split('\n');
-    for (const line of lines) {
-      try { if (JSON.parse(line).role === 'assistant') turns++; } catch {}
-    }
-  } catch {}
+  const { convDuration, turns } = readTranscriptStats(jsonlPath);
 
   const result = { agent: 'cursor', agentLabel: 'cursor', model: null, convDuration, turns,
                    ctxTokens: null, ctxWindow: null,
@@ -481,6 +484,63 @@ function readCursor() {
   return { ...base, ...(readCursorUsage() || {}) };
 }
 
+// Cursor CLI status line: JSON payload on stdin (see StatusLinePayload spec).
+// NOTE: Claude Code ALSO pipes a JSON payload to its statusLine command and
+// shares most fields (model, workspace, session_id, transcript_path, version,
+// output_style, even hook_event_name). The only fields Cursor stamps that
+// Claude never does are `cursor_version` and `context_window` — key off those
+// so a Claude Code session is never rendered as Cursor (the "bleed" bug).
+function readStatusLinePayload() {
+  if (process.stdin.isTTY) return null;
+  try {
+    const raw = fs.readFileSync(0, 'utf8').trim();
+    if (!raw.startsWith('{')) return null;
+    const payload = JSON.parse(raw);
+    if (payload.cursor_version || payload.context_window) return payload;
+  } catch {}
+  return null;
+}
+
+function readCursorFromPayload(payload) {
+  const cwd   = payload.cwd || payload.workspace?.current_dir || process.cwd();
+  const model = payload.model?.id || payload.model?.display_name || null;
+  const cw    = payload.context_window || {};
+
+  let ctxTokens = cw.total_input_tokens ?? null;
+  let ctxWindow = cw.context_window_size ?? null;
+  const ctxUsedPct = cw.used_percentage ?? null;
+  if (ctxTokens == null && ctxUsedPct != null && ctxWindow) {
+    ctxTokens = Math.round(ctxWindow * ctxUsedPct / 100);
+  }
+
+  const cacheKey = payload.session_id ? `cursor-sl-${payload.session_id}` : null;
+  if (cacheKey) {
+    const cached = cacheRead(cacheKey);
+    if (cached) return cached;
+  }
+
+  const { convDuration, turns } = payload.transcript_path
+    ? readTranscriptStats(payload.transcript_path)
+    : { convDuration: null, turns: 0 };
+
+  const result = {
+    agent: 'cursor',
+    model,
+    ctxTokens,
+    ctxWindow,
+    ctxUsedPct,
+    convDuration,
+    turns,
+    cwd,
+    convCost: null,
+    todayCost: null,
+    weekCost: null,
+    ...(readCursorUsage() || {}),
+  };
+  if (cacheKey) cacheWrite(cacheKey, result);
+  return result;
+}
+
 function safeReaddirSync(dir) {
   try { return fs.readdirSync(dir); } catch { return []; }
 }
@@ -548,10 +608,11 @@ function buildLine(data, cfg) {
   if (data.agentLabel && !data.convDuration && !data.ctxTokens) push(data.agentLabel);
 
   // Context window  (amber >30%, red >50%)
-  const ctxPct = data.ctxWindow ? (data.ctxTokens / data.ctxWindow) * 100 : null;
-  if (fmtPct(data.ctxTokens, data.ctxWindow)) {
-    push(paint(`ctx:${fmtPct(data.ctxTokens, data.ctxWindow)}`, threshLevel(ctxPct, 50, 30)));
-  }
+  const ctxPct = data.ctxUsedPct ?? (data.ctxWindow ? (data.ctxTokens / data.ctxWindow) * 100 : null);
+  const ctxLabel = data.ctxUsedPct != null
+    ? `${Math.round(data.ctxUsedPct)}%`
+    : fmtPct(data.ctxTokens, data.ctxWindow);
+  if (ctxLabel) push(paint(`ctx:${ctxLabel}`, threshLevel(ctxPct, 50, 30)));
 
   // Conversation wall-clock  (amber >2h, red >3h)
   const dur = fmtDuration(data.convDuration);
@@ -600,10 +661,11 @@ function buildLine(data, cfg) {
   if (data.model) push(paint(data.model.replace(/^claude-/, ''), modelLevel(data.model)));
 
   // PWD
-  push(shortPwd(process.cwd()));
+  const cwd = data.cwd || process.cwd();
+  push(shortPwd(cwd));
 
   // Git branch
-  push(getGitBranch());
+  push(getGitBranch(cwd));
 
   return fields.join(cfg.sep);
 }
@@ -613,16 +675,21 @@ function buildLine(data, cfg) {
 // ─────────────────────────────────────────────────────────────
 
 function main() {
-  const agent = detectAgent();
   const cfg   = loadConfig();
+  const agent = detectAgent();
+  let data    = {};
 
-  let data = {};
-  if      (agent === 'claude-code') data = readClaudeCode();
-  else if (agent === 'codex')       data = readCodex();
-  else if (agent === 'cursor')      data = readCursor();
-  else {
-    // Outside any agent — show git + pwd only (useful for testing)
-    data = { agent: 'unknown' };
+  // Claude Code is identified by its env vars and reads its own JSONL — handle
+  // it first so its stdin payload is never mistaken for Cursor's. Only after
+  // ruling out Claude do we consider a Cursor statusLine payload on stdin.
+  if (agent === 'claude-code') {
+    data = readClaudeCode();
+  } else {
+    const payload = readStatusLinePayload();
+    if      (payload)            data = readCursorFromPayload(payload);
+    else if (agent === 'codex')  data = readCodex();
+    else if (agent === 'cursor') data = readCursor();
+    else data = { agent: 'unknown' };
   }
 
   const line = buildLine(data, cfg);

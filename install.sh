@@ -64,20 +64,26 @@ EOF
     ok "Codex: agent-status items removed from $CODEX_TOML (restart Codex)"
   fi
 
-  # Cursor native footer: turn the running-time display back off (its default).
-  # Cursor's footer is fixed — the only knob we set is this one boolean.
+  # Cursor: remove statusLine command if it points at this repo's binary.
   CURSOR_CFG="$HOME_DIR/.cursor/cli-config.json"
   if [ -f "$CURSOR_CFG" ]; then
-    "$NODE" - "$CURSOR_CFG" <<'EOF'
+    "$NODE" - "$CURSOR_CFG" "$BINARY" <<'EOF'
 const fs = require('fs');
 const fp = process.argv[2];
+const bin = process.argv[3];
 let cfg; try { cfg = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { process.exit(0); }
-if (cfg && cfg.display && cfg.display.showStatusLineRunningTime === true) {
-  cfg.display.showStatusLineRunningTime = false;       // revert to Cursor's default
-  fs.writeFileSync(fp, JSON.stringify(cfg, null, 2) + '\n');
+let changed = false;
+if (cfg?.statusLine?.command && cfg.statusLine.command.includes('agent-status')) {
+  delete cfg.statusLine;
+  changed = true;
 }
+if (cfg?.display?.showStatusLineRunningTime === true) {
+  cfg.display.showStatusLineRunningTime = false;
+  changed = true;
+}
+if (changed) fs.writeFileSync(fp, JSON.stringify(cfg, null, 2) + '\n');
 EOF
-    ok "Cursor: footer running-time display turned off in $CURSOR_CFG (restart Cursor)"
+    ok "Cursor: statusLine + footer running-time cleared from $CURSOR_CFG (restart Cursor)"
   fi
 
   # Remove the snippet block(s): from the "# agent-status" marker line
@@ -242,32 +248,30 @@ else
   info "Codex not installed (~/.codex missing) — skipping native status-line config"
 fi
 
-# ── 5b. Cursor native footer (if installed) ─────────────────────
-# Cursor Agent (`agent` / cursor-agent) has NO external-command hook AND no
-# configurable item list (unlike Codex). Its footer — model · context% · cwd ·
-# branch — is a fixed built-in component. The ONLY knob is a single boolean in
-# ~/.cursor/cli-config.json (display.showStatusLineRunningTime) that adds the
-# elapsed running time to the footer; we enable it to get the closest match to
-# agent-status's ⏱ field. The agent-status script itself cannot render inside
-# the cursor-agent TUI.
+# ── 5b. Cursor CLI status line (if installed) ───────────────────
+# Cursor Agent supports an external statusLine command in ~/.cursor/cli-config.json
+# (same shape as Claude Code). We point it at agent-status and also enable the
+# built-in footer running-time display as a fallback when the command is slow.
 
 CURSOR_DIR="$HOME_DIR/.cursor"
 CURSOR_CFG="$CURSOR_DIR/cli-config.json"
 if [ -f "$CURSOR_CFG" ]; then
   cp "$CURSOR_CFG" "$CURSOR_CFG.bak.agentstatus"
-  "$NODE" - "$CURSOR_CFG" <<'EOF'
+  "$NODE" - "$CURSOR_CFG" "$BINARY" <<'EOF'
 const fs = require('fs');
 const fp = process.argv[2];
+const bin = process.argv[3];
 let cfg; try { cfg = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { console.log('skip'); process.exit(0); }
 cfg.display = cfg.display || {};
-if (cfg.display.showStatusLineRunningTime === true) { console.log('exists'); process.exit(0); }
 cfg.display.showStatusLineRunningTime = true;
+if (cfg.statusLine?.command === bin) { console.log('exists'); process.exit(0); }
+cfg.statusLine = { type: 'command', command: bin, padding: 0, updateIntervalMs: 300, timeoutMs: 2000 };
 fs.writeFileSync(fp, JSON.stringify(cfg, null, 2) + '\n');
 console.log('set');
 EOF
-  ok "Cursor: footer running-time display enabled in $CURSOR_CFG (restart Cursor to see it)"
+  ok "Cursor: statusLine command set in $CURSOR_CFG (restart Cursor to see it)"
 else
-  info "Cursor not installed (~/.cursor/cli-config.json missing) — skipping native footer config"
+  info "Cursor not installed (~/.cursor/cli-config.json missing) — skipping status line config"
 fi
 
 # ── 6. Budget config ─────────────────────────────────────────────
