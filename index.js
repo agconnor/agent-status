@@ -490,13 +490,19 @@ function readCursor() {
 // output_style, even hook_event_name). The only fields Cursor stamps that
 // Claude never does are `cursor_version` and `context_window` — key off those
 // so a Claude Code session is never rendered as Cursor (the "bleed" bug).
+function isCursorPayload(payload) {
+  // Cursor stamps `cursor_version`/`context_window`; Claude Code never does.
+  // Keying off these prevents a Claude session rendering as Cursor (bleed bug).
+  return !!(payload && (payload.cursor_version || payload.context_window));
+}
+
 function readStatusLinePayload() {
   if (process.stdin.isTTY) return null;
   try {
     const raw = fs.readFileSync(0, 'utf8').trim();
     if (!raw.startsWith('{')) return null;
     const payload = JSON.parse(raw);
-    if (payload.cursor_version || payload.context_window) return payload;
+    if (isCursorPayload(payload)) return payload;
   } catch {}
   return null;
 }
@@ -696,4 +702,13 @@ function main() {
   process.stdout.write(line + '\n');
 }
 
-main();
+if (require.main === module) main();
+
+// Exported for unit tests (test/index.test.js). Requiring this module must not
+// run main() — guarded above — so importers get the pure helpers only.
+module.exports = {
+  fmtDuration, fmtCost, fmtPct, fmtTimeLeft, shortPwd,
+  threshLevel, modelLevel, calcCost,
+  usageField, budgetField, buildLine, detectAgent,
+  isCursorPayload, loadConfig, MODELS,
+};
