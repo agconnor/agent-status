@@ -42,12 +42,14 @@ The installer:
 
 ### How each agent renders the status line
 
-Only **Claude Code** supports running an external command for its status line, so the `agent-status` script (and the exact ` │ `-separated layout above) is Claude-Code-only. **Codex** and **Cursor** each render their *own* built-in status line and expose no external-command hook:
+**Claude Code**, **Cursor**, and **Antigravity** (`agy`) all support running an external command for their status line, so the `agent-status` script renders the ` │ `-separated layout above directly inside them. **Codex** is the exception — it renders its *own* built-in status line and exposes no external-command hook:
 
-- **Codex** — the installer configures its native item list (`[tui].status_line`) to look as close as possible: model+effort · context · usage limits · branch · cwd, in Codex's own `·` style.
-- **Cursor** — its footer (`model · context% · cwd · branch`) is a **fixed** built-in component. Unlike Codex it has *no* configurable item list and no command hook, so it can't be made to render the `agent-status` layout. The single knob it exposes is `display.showStatusLineRunningTime` in `~/.cursor/cli-config.json`, which adds the elapsed running time to the footer — the installer turns that on.
+- **Claude Code** — the installer points its `statusLine` command at `agent-status`; renders the full layout.
+- **Cursor** — its CLI (`cursor-agent`) accepts an external `statusLine` command in `~/.cursor/cli-config.json` (same payload shape as Claude Code); the installer points it at `agent-status` and also enables `display.showStatusLineRunningTime` as a footer fallback.
+- **Antigravity (`agy`)** — the Gemini-CLI successor accepts an external `statusLine` command in `~/.gemini/antigravity-cli/settings.json` (`{ "command": "<bin>", "enabled": true }`); the installer wires it to `agent-status`. *For now agy renders a minimal line (cwd · branch) — full context/usage parsing lands once its stdin payload schema is mapped.*
+- **Codex** — no command hook; the installer instead configures its native item list (`[tui].status_line`) to look as close as possible: model+effort · context · usage limits · branch · cwd, in Codex's own `·` style.
 
-The shell snippet only appears in a **plain terminal** that has the agent's env vars set (e.g. the Cursor/VSCode *integrated terminal*); the Codex and `cursor-agent` TUIs don't run shell `precmd`, so it never shows *inside* them.
+The shell snippet only appears in a **plain terminal** that has the agent's env vars set (e.g. the Cursor/VSCode *integrated terminal*); the Codex and `cursor-agent`/`agy` TUIs don't run shell `precmd`, so it never shows *inside* them.
 
 Restart Claude Code and open a new terminal to pick it up.
 

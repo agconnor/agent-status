@@ -86,6 +86,21 @@ EOF
     ok "Cursor: statusLine + footer running-time cleared from $CURSOR_CFG (restart Cursor)"
   fi
 
+  # Antigravity (agy): remove statusLine command if it points at this repo's binary.
+  AGY_CFG="$HOME_DIR/.gemini/antigravity-cli/settings.json"
+  if [ -f "$AGY_CFG" ]; then
+    "$NODE" - "$AGY_CFG" <<'EOF'
+const fs = require('fs');
+const fp = process.argv[2];
+let cfg; try { cfg = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch { process.exit(0); }
+if (cfg?.statusLine?.command && cfg.statusLine.command.includes('agent-status')) {
+  delete cfg.statusLine;
+  fs.writeFileSync(fp, JSON.stringify(cfg, null, 2) + '\n');
+}
+EOF
+    ok "Antigravity: statusLine cleared from $AGY_CFG (restart agy)"
+  fi
+
   # Remove the snippet block(s): from the "# agent-status" marker line
   # through the next top-level `fi` (the outer if's closer, column 0).
   for rcfile in "$HOME_DIR/.zshrc" "$HOME_DIR/.bashrc"; do
@@ -105,7 +120,7 @@ EOF
   done
 
   printf '\nReset complete — the status line is unwired.\n'
-  printf 'Important: open a NEW terminal and restart Codex / Cursor.\n'
+  printf 'Important: open a NEW terminal and restart Codex / Cursor / agy.\n'
   printf 'Existing sessions already loaded the old prompt hook, so they\n'
   printf 'keep printing the old line until the shell is reloaded.\n'
 }
@@ -272,6 +287,31 @@ EOF
   ok "Cursor: statusLine command set in $CURSOR_CFG (restart Cursor to see it)"
 else
   info "Cursor not installed (~/.cursor/cli-config.json missing) — skipping status line config"
+fi
+
+# ── 5c. Antigravity (agy) status line (if installed) ────────────
+# Antigravity's CLI (agy, the Gemini-CLI successor) supports an external
+# statusLine command in ~/.gemini/antigravity-cli/settings.json (same shape
+# as Claude Code). We point it at agent-status so it renders the full layout.
+
+AGY_DIR="$HOME_DIR/.gemini/antigravity-cli"
+AGY_CFG="$AGY_DIR/settings.json"
+if [ -d "$AGY_DIR" ]; then
+  [ -f "$AGY_CFG" ] && cp "$AGY_CFG" "$AGY_CFG.bak.agentstatus"
+  "$NODE" - "$AGY_CFG" "$BINARY" <<'EOF'
+const fs = require('fs');
+const fp = process.argv[2];
+const bin = process.argv[3];
+let cfg = {}; try { cfg = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch {}
+if (cfg.statusLine?.command === bin) { console.log('exists'); process.exit(0); }
+cfg.statusLine = { command: bin, enabled: true };
+fs.mkdirSync(require('path').dirname(fp), { recursive: true });
+fs.writeFileSync(fp, JSON.stringify(cfg, null, 2) + '\n');
+console.log('set');
+EOF
+  ok "Antigravity: statusLine command set in $AGY_CFG (restart agy to see it)"
+else
+  info "Antigravity not installed (~/.gemini/antigravity-cli missing) — skipping status line config"
 fi
 
 # ── 6. Budget config ─────────────────────────────────────────────

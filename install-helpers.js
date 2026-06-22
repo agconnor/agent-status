@@ -85,6 +85,25 @@ switch (cmd) {
     if (changed) write(fp, cfg);
     break;
   }
+  case 'antigravity-status-line': {
+    // Antigravity (agy) supports an external statusLine command (Claude-shaped).
+    // Forward-slash the path so Git Bash on Windows doesn't eat backslashes.
+    const [fp, bin] = rest;
+    const cfg = read(fp) || {};
+    const cmdPath = bin.replace(/\\/g, '/');
+    if (cfg.statusLine?.command === cmdPath) break;  // already wired
+    cfg.statusLine = { command: cmdPath, enabled: true };
+    write(fp, cfg);
+    break;
+  }
+  case 'antigravity-status-line-reset': {
+    const [fp] = rest;
+    const cfg = read(fp); if (!cfg) break;
+    if (cfg.statusLine?.command && cfg.statusLine.command.includes('agent-status')) {
+      delete cfg.statusLine; write(fp, cfg);
+    }
+    break;
+  }
   case 'config-budget': {
     const [fp, daily, weekly] = rest;
     const cfg = read(fp) || {};

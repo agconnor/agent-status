@@ -15,7 +15,28 @@ const {
   threshLevel, modelLevel, calcCost,
   usageField, budgetField, buildLine, detectAgent,
   isCursorPayload, loadConfig, claudeProjectKey, chooseSource,
+  isAgyPayload, readAgyFromPayload,
 } = require('../index.js');
+
+// A real captured Antigravity (agy) statusLine stdin payload (trimmed).
+const AGY_PAYLOAD = {
+  cwd: '/Users/agc/bar_lm',
+  session_id: '8233a65e', conversation_id: '8233a65e',
+  transcript_path: '/nonexistent/transcript.jsonl',
+  model: { id: 'Gemini 3.5 Flash (Medium)', display_name: 'Gemini 3.5 Flash (Medium)' },
+  workspace: { current_dir: '/Users/agc/bar_lm', project_dir: '/Users/agc/bar_lm' },
+  version: '1.0.10',
+  context_window: {
+    total_input_tokens: 26194, total_output_tokens: 482,
+    context_window_size: 1048576, used_percentage: 2.498, remaining_percentage: 97.5,
+  },
+  product: 'antigravity',
+  quota: {
+    '3p-weekly':     { remaining_fraction: 1,         reset_in_seconds: 604772 },
+    'gemini-weekly': { remaining_fraction: 0.9872984, reset_in_seconds: 604151 },
+  },
+  agent_state: 'idle', plan_tier: 'Antigravity Starter Quota', terminal_width: 120,
+};
 
 // ─────────────────────────────────────────────────────────────
 // fmtDuration
@@ -212,7 +233,48 @@ test('chooseSource: no payload falls back to env detection', () => {
   assert.equal(chooseSource('claude-code', null), 'claude-code');
   assert.equal(chooseSource('codex', null), 'codex');
   assert.equal(chooseSource('cursor', null), 'cursor');
+  assert.equal(chooseSource('agy', null), 'agy');
   assert.equal(chooseSource('unknown', null), 'unknown');
+});
+
+test('chooseSource: env-detected agy with a stdin payload routes to agy', () => {
+  const agyPayload = { workspace: { current_dir: '/x' }, agent_state: 'running' };
+  assert.equal(chooseSource('agy', agyPayload), 'agy');
+});
+
+test('chooseSource: agy payload routes to agy even when env detection misses', () => {
+  // The real inside-agy case: agy passes NO ANTIGRAVITY_* env to the statusLine
+  // subprocess, so detectAgent returns "unknown". The payload carries no
+  // cursor_version, so the generic payload→cursor fallback would misroute it to
+  // Cursor. The product:"antigravity" marker must win first.
+  assert.equal(chooseSource('unknown', AGY_PAYLOAD), 'agy');
+});
+
+// ─────────────────────────────────────────────────────────────
+// isAgyPayload / readAgyFromPayload  (Antigravity, product-marker routed)
+// ─────────────────────────────────────────────────────────────
+test('isAgyPayload: product==="antigravity" is the marker', () => {
+  assert.equal(isAgyPayload(AGY_PAYLOAD), true);
+  assert.equal(isAgyPayload({ cursor_version: '2026.06' }), false);
+  assert.equal(isAgyPayload({ context_window: {} }), false);
+  assert.equal(isAgyPayload({}), false);
+  assert.equal(isAgyPayload(null), false);
+});
+
+test('isCursorPayload: an agy payload is NOT Cursor', () => {
+  assert.equal(isCursorPayload(AGY_PAYLOAD), false);
+});
+
+test('readAgyFromPayload: maps model, ctx %, and the gemini-weekly quota window', () => {
+  const d = readAgyFromPayload(AGY_PAYLOAD);
+  assert.equal(d.agent, 'agy');
+  assert.equal(d.model, 'Gemini 3.5 Flash (Medium)');
+  assert.equal(d.cwd, '/Users/agc/bar_lm');
+  assert.equal(d.ctxUsedPct, 2.498);
+  assert.equal(d.ctxWindow, 1048576);
+  // gemini-weekly remaining_fraction 0.9872984 → ~1% consumed; reset 604151s.
+  assert.equal(d.weekPct, 1);
+  assert.equal(d.weekResetMs, 604151 * 1000);
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -222,6 +284,7 @@ const AGENT_ENV = [
   'CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CODEX_SESSION_ID', 'OPENAI_CODEX',
   'CURSOR_AGENT', 'CURSOR_CONVERSATION_ID', 'CURSOR_TRACE_ID', 'CURSOR_SESSION_ID',
   'VSCODE_IPC_HOOK_CLI', 'VSCODE_GIT_IPC_HANDLE', 'AI_AGENT',
+  'ANTIGRAVITY_AGENT', 'ANTIGRAVITY_CONVERSATION_ID', 'ANTIGRAVITY_TRAJECTORY_ID',
 ];
 let savedEnv;
 beforeEach(() => {
@@ -245,11 +308,16 @@ test('detectAgent: claude / codex / cursor / unknown', () => {
   delete process.env.CODEX_SESSION_ID;
   process.env.CURSOR_AGENT = '1';
   assert.equal(detectAgent(), 'cursor');
+  delete process.env.CURSOR_AGENT;
+  process.env.ANTIGRAVITY_AGENT = '1';
+  assert.equal(detectAgent(), 'agy');
 });
 
 test('detectAgent: AI_AGENT fallback', () => {
   process.env.AI_AGENT = 'cursor-agent';
   assert.equal(detectAgent(), 'cursor');
+  process.env.AI_AGENT = 'antigravity';
+  assert.equal(detectAgent(), 'agy');
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -284,4 +352,22 @@ test('buildLine: assembles a Claude-style line, strips claude- prefix', () => {
 test('buildLine: uses ctxUsedPct directly when present', () => {
   const line = buildLine({ agent: 'cursor', ctxUsedPct: 37.4, cwd: os.tmpdir() }, loadConfig());
   assert.match(line, /ctx:37%/);
+});
+
+test('buildLine: minimal agy data renders the agy label + cwd', () => {
+  // Env-only fallback (no payload): just agent label + cwd.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-status-test-'));
+  const line = buildLine({ agent: 'agy', agentLabel: 'agy', cwd: tmp }, loadConfig());
+  assert.match(line, /agy/);
+  assert.match(line, new RegExp(path.basename(tmp)));
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('buildLine: a parsed agy payload renders ctx, weekly window, and model', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-status-test-'));
+  const line = buildLine({ ...readAgyFromPayload(AGY_PAYLOAD), cwd: tmp }, loadConfig());
+  assert.match(line, /ctx:2%/);
+  assert.match(line, /wk:1%/);
+  assert.match(line, /Gemini 3\.5 Flash/);
+  fs.rmSync(tmp, { recursive: true, force: true });
 });

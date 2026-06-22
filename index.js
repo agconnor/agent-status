@@ -115,8 +115,8 @@ const USE_COLOR = !process.env.NO_COLOR;
 
 // burn-tier classification by model name (user-confirmed: sonnet=amber)
 const MODEL_TIER = {
-  red:   [/opus/i, /gpt-5\.5/i],
-  amber: [/gpt-5\.4/i, /composer-2\.5/i, /sonnet/i],
+  red:   [/opus/i, /gpt-5\.5/i, /gemini.*pro/i],
+  amber: [/gpt-5\.4/i, /composer-2\.5/i, /sonnet/i, /gemini.*flash/i],
 };
 
 function paint(text, level) {
@@ -524,6 +524,55 @@ function readCursor() {
   return { ...base, ...(readCursorUsage() || {}) };
 }
 
+// Antigravity (agy) renders via an external statusLine command (like Claude Code),
+// piping a JSON payload on stdin. Env-only fallback when no payload is present
+// (e.g. a plain terminal with ANTIGRAVITY_AGENT set) — buildLine fills cwd + branch.
+function readAgy() {
+  return { agent: 'agy', agentLabel: 'agy', cwd: process.cwd() };
+}
+
+// agy's payload is Claude/Cursor-shaped (model, workspace, context_window,
+// transcript_path) but stamps `product:"antigravity"` and exposes weekly quota
+// windows under `quota` (no 5h/session window). Mirrors readCursorFromPayload.
+function readAgyFromPayload(payload) {
+  const cwd   = payload.cwd || payload.workspace?.current_dir || process.cwd();
+  const model = payload.model?.id || payload.model?.display_name || null;
+  const cw    = payload.context_window || {};
+
+  let ctxTokens     = cw.total_input_tokens ?? null;
+  const ctxWindow   = cw.context_window_size ?? null;
+  const ctxUsedPct  = cw.used_percentage ?? null;
+  if (ctxTokens == null && ctxUsedPct != null && ctxWindow) {
+    ctxTokens = Math.round(ctxWindow * ctxUsedPct / 100);
+  }
+
+  // Weekly usage window: prefer the primary Gemini quota; map the remaining
+  // fraction to % consumed and reset_in_seconds to a time-to-reset.
+  const q = payload.quota?.['gemini-weekly'] || payload.quota?.['3p-weekly'] || null;
+  let weekPct = null, weekResetMs = null;
+  if (q && q.remaining_fraction != null) {
+    weekPct = Math.round((1 - q.remaining_fraction) * 100);
+    if (q.reset_in_seconds != null) weekResetMs = q.reset_in_seconds * 1000;
+  }
+
+  const { convDuration, turns } = payload.transcript_path
+    ? readTranscriptStats(payload.transcript_path)
+    : { convDuration: null, turns: 0 };
+
+  return {
+    agent: 'agy',
+    model,
+    ctxTokens,
+    ctxWindow,
+    ctxUsedPct,
+    convDuration,
+    turns,
+    weekPct,
+    weekResetMs,
+    cwd,
+  };
+}
+
 // Both Claude Code and Cursor pipe a JSON payload to their statusLine command
 // on stdin, sharing most fields (model, workspace, session_id, transcript_path,
 // version, output_style, even hook_event_name). Read it once, then disambiguate.
@@ -543,6 +592,13 @@ function isCursorPayload(p) {
   return !!(p && p.cursor_version);
 }
 
+// agy stamps every statusLine payload with `product:"antigravity"`. This is the
+// reliable routing signal because agy does NOT export ANTIGRAVITY_* into the
+// statusLine subprocess's env — so detectAgent() can't see it from inside agy.
+function isAgyPayload(p) {
+  return !!(p && p.product === 'antigravity');
+}
+
 // Decide which reader owns this invocation. Claude Code and Cursor BOTH pipe a
 // statusLine payload that now shares `context_window` and `transcript_path`, so
 // the payload SHAPE can't disambiguate them — routing on it bled both ways
@@ -553,7 +609,13 @@ function isCursorPayload(p) {
 // must be Cursor's; else fall back to pure env detection.
 function chooseSource(agent, payload) {
   if (isCursorPayload(payload)) return 'cursor';
+  // Antigravity stamps `product:"antigravity"` — the only reliable signal, since
+  // it passes no ANTIGRAVITY_* env to the statusLine subprocess (so detectAgent
+  // returns "unknown" from inside agy). Must win before the payload→cursor
+  // fallback below, else an agy session renders as Cursor.
+  if (isAgyPayload(payload))    return 'agy';
   if (agent === 'claude-code')  return 'claude-code';
+  if (agent === 'agy')          return 'agy';
   if (payload)                  return 'cursor';
   if (agent === 'codex')        return 'codex';
   if (agent === 'cursor')       return 'cursor';
@@ -614,10 +676,13 @@ function detectAgent() {
   if (process.env.CURSOR_AGENT === '1' || process.env.CURSOR_CONVERSATION_ID) return 'cursor';
   if (process.env.CURSOR_TRACE_ID  || process.env.CURSOR_SESSION_ID)    return 'cursor';
   if (process.env.VSCODE_IPC_HOOK_CLI || process.env.VSCODE_GIT_IPC_HANDLE) return 'cursor';
+  if (process.env.ANTIGRAVITY_AGENT === '1' || process.env.ANTIGRAVITY_CONVERSATION_ID
+      || process.env.ANTIGRAVITY_TRAJECTORY_ID) return 'agy';
   const ai = process.env.AI_AGENT || '';
   if (ai.includes('claude')) return 'claude-code';
   if (ai.includes('codex'))  return 'codex';
   if (ai.includes('cursor')) return 'cursor';
+  if (ai.includes('agy') || ai.includes('antigravity')) return 'agy';
   return 'unknown';
 }
 
@@ -745,6 +810,7 @@ function main() {
     // one (e.g. the IDE/agent) it falls back to the usage API.
     case 'cursor':      data = payload ? readCursorFromPayload(payload) : readCursor(); break;
     case 'codex':       data = readCodex(); break;
+    case 'agy':         data = payload ? readAgyFromPayload(payload) : readAgy(); break;
     default:            data = { agent: 'unknown' };
   }
 
@@ -760,5 +826,6 @@ module.exports = {
   fmtDuration, fmtCost, fmtPct, fmtTimeLeft, shortPwd,
   threshLevel, modelLevel, calcCost,
   usageField, budgetField, buildLine, detectAgent,
-  isCursorPayload, chooseSource, loadConfig, claudeProjectKey, MODELS,
+  isCursorPayload, isAgyPayload, readAgyFromPayload,
+  chooseSource, loadConfig, claudeProjectKey, MODELS,
 };

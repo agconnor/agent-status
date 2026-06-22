@@ -54,6 +54,12 @@ function Do-Reset {
     Write-Ok "Cursor: statusLine command + footer running-time cleared from $cursorCfg (restart Cursor)"
   }
 
+  $agyCfg = Join-Path $HomeDir '.gemini\antigravity-cli\settings.json'
+  if (Test-Path $agyCfg) {
+    Invoke-Helper 'antigravity-status-line-reset' @($agyCfg)
+    Write-Ok "Antigravity: statusLine cleared from $agyCfg (restart agy)"
+  }
+
   $profilePath = $PROFILE.CurrentUserCurrentHost
   if (Test-Path $profilePath) {
     $lines = Get-Content $profilePath
@@ -74,7 +80,7 @@ function Do-Reset {
 
   Write-Host ""
   Write-Host "Reset complete - the status line is unwired."
-  Write-Host "Open a NEW terminal and restart Codex / Cursor."
+  Write-Host "Open a NEW terminal and restart Codex / Cursor / agy."
 }
 
 $Node = Find-Node
@@ -149,6 +155,16 @@ if (Test-Path $cursorCfg) {
   Write-Ok "Cursor: statusLine command set in $cursorCfg (restart Cursor to see it)"
 } else {
   Write-Info 'Cursor not installed (~\.cursor\cli-config.json missing) - skipping status line config'
+}
+
+$agyDir = Join-Path $HomeDir '.gemini\antigravity-cli'
+if (Test-Path $agyDir) {
+  $agyCfg = Join-Path $agyDir 'settings.json'
+  if (Test-Path $agyCfg) { Copy-Item $agyCfg "$agyCfg.bak.agentstatus" -Force }
+  Invoke-Helper 'antigravity-status-line' @($agyCfg, $Binary)
+  Write-Ok "Antigravity: statusLine command set in $agyCfg (restart agy to see it)"
+} else {
+  Write-Info 'Antigravity not installed (~\.gemini\antigravity-cli missing) - skipping status line config'
 }
 
 $cfgFile = Join-Path $HomeDir '.config\agent-status\config.json'
